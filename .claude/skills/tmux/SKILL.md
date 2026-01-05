@@ -132,11 +132,7 @@ ctmux kill py --force
 
 ## Style Encoding Reference
 
-Screen captures strip ANSI codes by default. The `--style` flag re-encodes style information in token-efficient formats that models can reliably parse.
-
-### Why Not Raw ANSI?
-
-Raw codes like `\x1b[7mtext\x1b[0m` are verbose and hard to parse. More importantly, models can't reliably count characters, so approaches like "next 16 chars are blue" fail. **Wrapping/tagging works** because the styled text is literally between markers.
+Screen captures strip ANSI codes by default. The `--style` flag re-encodes style information in token-efficient formats.
 
 ### Style Levels
 
@@ -195,29 +191,25 @@ Preserves raw ANSI escape codes:
 
 **Use when:** Debugging style detection issues or need exact codes.
 
-### Alternative Approaches Considered
+### Fallback: Raw ANSI with Regex
 
-#### Unicode Brackets
-```
-「selected」⟨error⟩
-```
-Compact but may not render consistently; models may not know convention.
+If `--style=lines` or `--style=tags` don't capture what you need, use `--style=ansi` and parse with regex:
 
-#### Summary Block
-```
-<screen>
-...content...
-</screen>
-[inverse: lines 3,7]
-[red: line 5 cols 8-24]
-```
-Good for complex screens but requires cross-referencing.
+```bash
+# Get raw ANSI output
+ctmux capture SESSION --style=ansi --raw > screen.txt
 
-#### Run-Length Encoding
+# Find inverse/selected regions
+grep -oP '\x1b\[7m.*?\x1b\[0m' screen.txt
+
+# Find red text (errors)
+grep -oP '\x1b\[31m.*?\x1b\[(0|39)m' screen.txt
+
+# Find any background-colored text (selection in htop, etc.)
+grep -oP '\x1b\[4[0-7]m.*?\x1b\[(0|49)m' screen.txt
 ```
-[16 blue chars]Some text here
-```
-**Doesn't work** - models can't reliably count characters to tokens.
+
+This is verbose but handles any edge case when the built-in transforms don't suffice.
 
 ### Common ANSI Codes Detected
 
@@ -232,12 +224,3 @@ Good for complex screens but requires cross-referencing.
 | `\x1b[33m` | Yellow FG | - | `[y]` |
 | `\x1b[0m` | Reset | - | closing tag |
 
-### Implementation Notes
-
-Style detection requires capturing with ANSI codes enabled, then parsing and transforming. The transformation:
-
-1. Capture screen with `escape_sequences=True`
-2. Parse ANSI codes to build style map (which chars have which styles)
-3. For `--style=lines`: find dominant style per line, add prefix
-4. For `--style=tags`: insert open/close tags at style boundaries
-5. Strip remaining ANSI codes from output
