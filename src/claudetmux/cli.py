@@ -267,7 +267,7 @@ def send_keys(session: str, keys: tuple[str, ...], pane: str | None, literal: bo
     if enter:
         key_string += " Enter"
 
-    p.send_keys(key_string, literal=literal)
+    p.send_keys(key_string, literal=literal, enter=False)
     click.echo(f"Sent: {key_string}")
 
 
