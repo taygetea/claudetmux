@@ -7,159 +7,117 @@ allowed-tools:
 
 # tmux Interaction Skill
 
-Use the `ctmux` CLI tool to interact with tmux sessions. This enables viewing pane contents, sending keystrokes/mouse input, and running multi-step TUI testing macros.
+Use `ctmux` to interact with tmux sessions for TUI automation and testing.
 
-## CLI Location
+## Important: Use Subagents for Multi-Step TUI Tasks
 
-After running the install script, `ctmux` is available globally:
+**Each ctmux call produces significant output (full screen captures).** For tasks involving more than 2-3 ctmux calls, spawn a subagent to manage context:
 
-```bash
-ctmux --help
+```
+Use Task tool with subagent_type="general-purpose" for TUI automation tasks.
+The subagent can make many ctmux calls without bloating the main conversation.
 ```
 
-## Commands
+This keeps the parent conversation lean while the subagent handles the verbose screen captures.
 
-### Session Management
+## Quick Reference
 
 ```bash
-# List all sessions
-ctmux list [--json]
-
-# List windows in a session
-ctmux windows SESSION [--json]
-
-# List panes in a session/window
-ctmux panes SESSION [--window NAME] [--json]
-
-# Create a new session
-ctmux new SESSION_NAME [--window NAME] [--cmd "initial command"] [--width 120] [--height 40]
-
-# Kill a session
-ctmux kill SESSION [--force]
+ctmux new SESSION [--cmd "command"]     # Create session
+ctmux capture SESSION                    # Get screen + cursor position
+ctmux capture SESSION --if-changed       # Only if screen changed
+ctmux send SESSION KEY1 KEY2 ...         # Send key sequences
+ctmux type SESSION "text" [--enter]      # Type literal text
+ctmux kill SESSION --force               # Clean up
 ```
 
-### Screen Capture
+## Capture Output Format
 
-```bash
-# Capture visible viewport with cursor position
-ctmux capture SESSION [--pane ID]
-# Output ends with: [cursor: X,Y]
-
-# Capture only if changed (avoids redundant output)
-ctmux capture SESSION --if-changed
-
-# Include scrollback history
-ctmux capture SESSION --history [--lines N]
-
-# Raw output without cursor metadata
-ctmux capture SESSION --raw
-
-# Watch for changes with timeout
-ctmux watch SESSION [--interval 0.5] [--timeout 30] [--until "text to wait for"]
+Default capture shows visible viewport + cursor metadata:
+```
+<screen content>
+[cursor: 5,10]
 ```
 
-### Input
+Flags:
+- `--if-changed` - suppress output if screen unchanged (use when polling)
+- `--history` - include scrollback history
+- `--raw` - omit cursor metadata
+
+## Key Sequences
+
+For `ctmux send`:
+- `Enter`, `Escape`, `Space`, `Tab`, `BSpace`
+- `C-c`, `C-d`, `C-z` (Ctrl+key)
+- `Up`, `Down`, `Left`, `Right`
+- `F1` through `F12`
+- `PgUp`, `PgDn`, `Home`, `End`
+
+## Known Limitations
+
+### Character Escaping (Shell History Expansion)
+
+The `!` character has special meaning in bash/zsh (history expansion). When typing text containing `!`, the receiving shell may escape it:
 
 ```bash
-# Send tmux key sequences (e.g., Enter, C-c, Escape)
-ctmux send SESSION KEY1 KEY2 ... [--pane ID] [--literal] [--enter]
-
-# Type literal text (for user input)
-ctmux type SESSION "text to type" [--pane ID] [--enter] [--delay MS]
-
-# Mouse click at coordinates
-ctmux mouse SESSION X Y [--pane ID] [--click left|right|middle] [--double]
+ctmux type session "print('hello!')"
+# May appear as: print('hello\!')
 ```
 
-## Best Practices
+**This is shell behavior, not a ctmux bug.** Workarounds:
+- Use single quotes in the target shell: `ctmux type session "echo 'hello!'"`
+- Avoid `!` in automation scripts where possible
+- The target application still receives the text (escaping is visual)
 
-### Default Behavior
+### Colors and Selection Indicators
 
-By default, `capture` shows only the visible viewport (no scrollback history) and appends cursor position:
+Screen captures are plain text - ANSI color codes are stripped. This means:
+- You cannot see which item is "selected" (usually inverse video)
+- Error messages (red) look like normal text
+- Syntax highlighting is not visible
+
+**Current workarounds:**
+- Use cursor position `[cursor: X,Y]` to track navigation
+- Check for text changes to infer state (e.g., menu text changes when selection moves)
+- Look for text indicators (e.g., `>` prefix, `[x]` checkboxes)
+
+**Future:** May add `--ansi` flag to preserve escape codes, or transform to token-efficient markers like `[SEL]` for selected lines.
+
+### Timing
+
+TUI apps need time to render. Use:
+- `sleep 0.3` after sending input before capture
+- `watch --until "text"` to wait for specific output
+- `--if-changed` to avoid capturing stale content
+
+## Example: Testing htop
+
 ```bash
-ctmux capture my-session
-# Output:
-# <visible screen content>
-# [cursor: 5,10]
+# Create session and launch htop
+ctmux new htop-test --cmd "htop"
+sleep 1
+
+# Open setup menu
+ctmux send htop-test F2
+sleep 0.3
+ctmux capture htop-test
+
+# Navigate and exit
+ctmux send htop-test Escape
+ctmux send htop-test q
+ctmux kill htop-test --force
 ```
 
-### Change Detection
-
-Use `--if-changed` when polling to avoid duplicate output:
+## Example: Python REPL
 
 ```bash
-ctmux capture my-session --if-changed
-```
+ctmux new py --cmd "python3"
+ctmux watch py --until ">>>" --timeout 10
 
-### Waiting for Output
-
-Use `watch --until` to wait for specific text to appear:
-
-```bash
-# Wait for prompt to return after a command
-ctmux type my-session "make build" --enter
-ctmux watch my-session --until "$ " --timeout 60
-```
-
-### Multi-step Macros
-
-For testing TUI applications, chain commands with change detection:
-
-```bash
-# 1. Start the TUI app
-ctmux type my-session "vim test.txt" --enter
-sleep 0.5
-ctmux capture my-session --if-changed
-
-# 2. Enter insert mode
-ctmux send my-session i
-ctmux capture my-session --if-changed
-
-# 3. Type some text
-ctmux type my-session "Hello, world!"
-ctmux capture my-session --if-changed
-
-# 4. Save and quit
-ctmux send my-session Escape
-ctmux type my-session ":wq" --enter
-ctmux capture my-session --if-changed
-```
-
-### Error Detection
-
-If a command produces unexpected output, the screen capture will show the error. Compare expected vs actual output to diagnose issues.
-
-### Key Sequences
-
-Common tmux key sequences for `ctmux send`:
-- `Enter` - Enter/Return key
-- `Escape` - Escape key
-- `Space` - Space bar
-- `Tab` - Tab key
-- `BSpace` - Backspace
-- `C-c` - Ctrl+C
-- `C-d` - Ctrl+D
-- `C-z` - Ctrl+Z
-- `Up`, `Down`, `Left`, `Right` - Arrow keys
-- `PgUp`, `PgDn` - Page up/down
-- `Home`, `End` - Home/End keys
-- `F1` through `F12` - Function keys
-
-## Example: Testing a REPL
-
-```bash
-# Create session for testing
-ctmux new test-repl --cmd "python3"
-
-# Wait for Python prompt
-ctmux watch test-repl --until ">>>" --timeout 10
-
-# Run some code
-ctmux type test-repl "print('hello')" --enter
+ctmux type py "2 + 2" --enter
 sleep 0.2
-ctmux capture test-repl --if-changed
+ctmux capture py --if-changed
 
-# Exit
-ctmux send test-repl C-d
-ctmux kill test-repl --force
+ctmux send py C-d
+ctmux kill py --force
 ```
