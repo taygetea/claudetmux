@@ -2,15 +2,137 @@
 
 import hashlib
 import json
+import re
 import sys
+import tempfile
 from pathlib import Path
 
 import click
 import libtmux
 
 
+# ANSI escape code pattern
+ANSI_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
+
+# Style detection patterns
+STYLE_CODES = {
+    'inverse': re.compile(r'\x1b\[7m'),           # Inverse/reverse video
+    'bg_color': re.compile(r'\x1b\[4[0-7]m'),     # Background colors (40-47) - used for selection
+    'bold': re.compile(r'\x1b\[1m'),              # Bold
+    'red': re.compile(r'\x1b\[31m'),              # Red foreground
+    'green': re.compile(r'\x1b\[32m'),            # Green foreground
+    'yellow': re.compile(r'\x1b\[33m'),           # Yellow foreground
+    'underline': re.compile(r'\x1b\[4m(?![0-7])'), # Underline (but not bg color)
+    'reset': re.compile(r'\x1b\[0?m'),            # Reset
+}
+
+
+def strip_ansi(text: str) -> str:
+    """Remove all ANSI escape codes from text."""
+    return ANSI_PATTERN.sub('', text)
+
+
+def detect_line_style(line: str) -> str | None:
+    """Detect dominant style in a line. Returns style name or None."""
+    # Priority: inverse/selection > red > bold (most important for TUI automation)
+    # Both inverse video and background colors indicate selection in TUIs
+    if STYLE_CODES['inverse'].search(line):
+        return 'inverse'
+    if STYLE_CODES['bg_color'].search(line):
+        return 'inverse'  # Treat background color as selection
+    if STYLE_CODES['red'].search(line):
+        return 'red'
+    if STYLE_CODES['bold'].search(line):
+        return 'bold'
+    return None
+
+
+def transform_lines_style(content: str) -> str:
+    """Transform content with line-prefix style markers."""
+    lines = content.split('\n')
+    result = []
+
+    for line in lines:
+        style = detect_line_style(line)
+        clean_line = strip_ansi(line)
+
+        if style == 'inverse':
+            result.append(f"> {clean_line}")
+        elif style == 'red':
+            result.append(f"! {clean_line}")
+        elif style == 'bold':
+            result.append(f"* {clean_line}")
+        else:
+            result.append(f"  {clean_line}")
+
+    return '\n'.join(result)
+
+
+def transform_tags_style(content: str) -> str:
+    """Transform content with inline semantic tags."""
+    # Replace ANSI codes with semantic tags
+    # Track current style state
+    result = []
+    current_styles = set()
+
+    # Tag mapping - bg_color maps to 'i' (inverse/selection)
+    TAG_MAP = {
+        'inverse': 'i', 'bg_color': 'i',  # Both indicate selection
+        'bold': 'b', 'red': 'r', 'green': 'g', 'yellow': 'y', 'underline': 'u'
+    }
+
+    # Process character by character, tracking style state
+    i = 0
+    text = content
+
+    while i < len(text):
+        # Check for ANSI escape sequence
+        if text[i] == '\x1b' and i + 1 < len(text) and text[i + 1] == '[':
+            # Find end of escape sequence
+            end = text.find('m', i)
+            if end != -1:
+                seq = text[i:end + 1]
+
+                # Check what style this sets
+                if STYLE_CODES['reset'].match(seq):
+                    # Close all open styles
+                    for style in list(current_styles):
+                        tag = TAG_MAP.get(style)
+                        if tag:
+                            result.append(f'[/{tag}]')
+                    current_styles.clear()
+                # Check for default bg (49) which also resets selection
+                elif re.match(r'\x1b\[49m', seq):
+                    if 'bg_color' in current_styles:
+                        result.append('[/i]')
+                        current_styles.discard('bg_color')
+                else:
+                    for style_name, pattern in STYLE_CODES.items():
+                        if style_name != 'reset' and pattern.match(seq):
+                            # For bg_color, use 'inverse' slot to avoid duplicates
+                            slot = 'bg_color' if style_name == 'bg_color' else style_name
+                            if slot not in current_styles:
+                                tag = TAG_MAP.get(style_name)
+                                if tag:
+                                    result.append(f'[{tag}]')
+                                    current_styles.add(slot)
+
+                i = end + 1
+                continue
+
+        result.append(text[i])
+        i += 1
+
+    # Close any remaining open tags
+    for style in current_styles:
+        tag = TAG_MAP.get(style)
+        if tag:
+            result.append(f'[/{tag}]')
+
+    return ''.join(result)
+
+
 # Store last screen hash to detect changes (persisted to temp file)
-import tempfile
 
 HASH_FILE = Path(tempfile.gettempdir()) / "ctmux_screen_hashes.json"
 
@@ -177,27 +299,39 @@ def list_panes(session: str, window: str | None, as_json: bool):
 @click.option("--if-changed", is_flag=True, help="Only output if screen changed")
 @click.option("--history", "-H", is_flag=True, help="Include scrollback history")
 @click.option("--raw", "-r", is_flag=True, help="Raw output without cursor metadata")
-def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool, history: bool, raw: bool):
+@click.option("--style", "-s", type=click.Choice(["none", "lines", "tags", "ansi"]),
+              default="none", help="Style encoding: none, lines (prefixes), tags (inline), ansi (raw)")
+def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool,
+                 history: bool, raw: bool, style: str):
     """Capture pane contents.
 
     By default, captures only the visible viewport and appends cursor position.
     Use --history to include scrollback, --raw for plain output.
+
+    Style modes:
+      none  - Plain text (default)
+      lines - Line prefixes: > (selected), ! (error), * (bold)
+      tags  - Inline tags: [i]inverse[/i], [r]red[/r], etc.
+      ansi  - Raw ANSI escape codes
     """
     server = get_server()
     sess = find_session(server, session)
     p = find_pane(sess, pane)
 
+    # Determine if we need ANSI codes
+    need_ansi = style in ("lines", "tags", "ansi")
+
     # Capture visible viewport only (default) or with history
     if history:
-        content = p.capture_pane(start=f"-{lines}", end="-0")
+        content = p.capture_pane(start=f"-{lines}", end="-0", escape_sequences=need_ansi)
     else:
         # Visible viewport only - no scrollback
-        content = p.capture_pane(start=0, end="-")
+        content = p.capture_pane(start=0, end="-", escape_sequences=need_ansi)
 
     if isinstance(content, list):
         content = "\n".join(content)
 
-    # Check if changed
+    # Check if changed (use raw content for hash to detect style changes too)
     if if_changed:
         content_hash = hashlib.md5(content.encode()).hexdigest()
         pane_key = f"{session}:{p.pane_id}"
@@ -206,6 +340,15 @@ def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool, h
             click.echo("[no change]")
             return
         save_screen_hash(pane_key, content_hash)
+
+    # Transform based on style mode
+    if style == "lines":
+        content = transform_lines_style(content)
+    elif style == "tags":
+        content = transform_tags_style(content)
+    elif style == "none":
+        content = strip_ansi(content) if need_ansi else content
+    # style == "ansi" keeps content as-is with escape codes
 
     click.echo(content)
 
