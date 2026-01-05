@@ -41,11 +41,18 @@ ctmux kill SESSION [--force]
 ### Screen Capture
 
 ```bash
-# Capture current pane contents
-ctmux capture SESSION [--pane ID] [--lines N] [--history]
+# Capture visible viewport with cursor position
+ctmux capture SESSION [--pane ID]
+# Output ends with: [cursor: X,Y]
 
 # Capture only if changed (avoids redundant output)
 ctmux capture SESSION --if-changed
+
+# Include scrollback history
+ctmux capture SESSION --history [--lines N]
+
+# Raw output without cursor metadata
+ctmux capture SESSION --raw
 
 # Watch for changes with timeout
 ctmux watch SESSION [--interval 0.5] [--timeout 30] [--until "text to wait for"]
@@ -66,16 +73,22 @@ ctmux mouse SESSION X Y [--pane ID] [--click left|right|middle] [--double]
 
 ## Best Practices
 
+### Default Behavior
+
+By default, `capture` shows only the visible viewport (no scrollback history) and appends cursor position:
+```bash
+ctmux capture my-session
+# Output:
+# <visible screen content>
+# [cursor: 5,10]
+```
+
 ### Change Detection
 
-Always use `--if-changed` when polling to avoid sending duplicate screen content:
+Use `--if-changed` when polling to avoid duplicate output:
 
 ```bash
-# Good: Only outputs when content changes
 ctmux capture my-session --if-changed
-
-# Bad: Outputs same content repeatedly
-ctmux capture my-session
 ```
 
 ### Waiting for Output

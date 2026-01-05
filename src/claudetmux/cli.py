@@ -173,20 +173,26 @@ def list_panes(session: str, window: str | None, as_json: bool):
 @main.command("capture")
 @click.argument("session")
 @click.option("--pane", "-p", help="Pane ID or index")
-@click.option("--lines", "-n", default=50, help="Number of lines to capture")
+@click.option("--lines", "-n", default=50, help="Number of history lines (with --history)")
 @click.option("--if-changed", is_flag=True, help="Only output if screen changed")
 @click.option("--history", "-H", is_flag=True, help="Include scrollback history")
-def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool, history: bool):
-    """Capture pane contents."""
+@click.option("--raw", "-r", is_flag=True, help="Raw output without cursor metadata")
+def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool, history: bool, raw: bool):
+    """Capture pane contents.
+
+    By default, captures only the visible viewport and appends cursor position.
+    Use --history to include scrollback, --raw for plain output.
+    """
     server = get_server()
     sess = find_session(server, session)
     p = find_pane(sess, pane)
 
-    # Capture with or without history
+    # Capture visible viewport only (default) or with history
     if history:
         content = p.capture_pane(start=f"-{lines}", end="-0")
     else:
-        content = p.capture_pane()
+        # Visible viewport only - no scrollback
+        content = p.capture_pane(start=0, end="-")
 
     if isinstance(content, list):
         content = "\n".join(content)
@@ -202,6 +208,10 @@ def capture_pane(session: str, pane: str | None, lines: int, if_changed: bool, h
         save_screen_hash(pane_key, content_hash)
 
     click.echo(content)
+
+    # Append cursor metadata unless --raw
+    if not raw:
+        click.echo(f"[cursor: {p.cursor_x},{p.cursor_y}]")
 
 
 @main.command("watch")
@@ -227,7 +237,7 @@ def watch_pane(session: str, pane: str | None, interval: float, timeout: float, 
             click.echo(f"[timeout after {timeout}s]", err=True)
             break
 
-        content = p.capture_pane()
+        content = p.capture_pane(start=0, end="-")  # Visible viewport only
         if isinstance(content, list):
             content = "\n".join(content)
 
@@ -236,6 +246,7 @@ def watch_pane(session: str, pane: str | None, interval: float, timeout: float, 
         if content_hash != last_hash:
             click.echo(f"--- [{elapsed:.1f}s] ---")
             click.echo(content)
+            click.echo(f"[cursor: {p.cursor_x},{p.cursor_y}]")
             last_hash = content_hash
 
             if until and until in content:
